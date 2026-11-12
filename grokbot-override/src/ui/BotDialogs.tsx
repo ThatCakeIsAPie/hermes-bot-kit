@@ -16,7 +16,7 @@ import { BotAvatar, botColor } from './Avatar'
 import { OverrideBoundary } from './Boundary'
 import { JobDetailDialog, JobDialog, JobRemoveDialog } from './CronDialogs'
 import { Check, Confirm, Dialog, Field, Select, Tabs } from './kit'
-import { AdvancedConfig, ModelPicker } from './ProfileConfig'
+import { AdvancedConfig, EffortField, ModelPicker } from './ProfileConfig'
 import {
   createBot,
   deleteBot,
@@ -24,10 +24,12 @@ import {
   generateAvatar,
   groupHasRoom,
   listConnections,
+  loadBotEffort,
   loadBotModel,
   loadCreateCatalog,
   probeImageGeneration,
   saveAdvanced,
+  saveBotEffort,
   saveBotModel,
   saveMeta,
   saveProfileEdits,
@@ -370,7 +372,7 @@ export function ConfigDialog({ bot, initial, onClose }: { bot: any; initial?: an
   const [adv, setAdv] = React.useState<any>(() => (initial?.loaded ? initial : emptyAdvancedState()))
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<null | string>(null)
-  const dirty = adv.dirtyModel || adv.dirtySoul || adv.dirtySkills || adv.dirtyToolsets || adv.dirtyMcp
+  const dirty = adv.dirtyModel || adv.dirtyEffort || adv.dirtySoul || adv.dirtySkills || adv.dirtyToolsets || adv.dirtyMcp
   return (
     <Dialog
       open
@@ -396,8 +398,12 @@ export function ConfigDialog({ bot, initial, onClose }: { bot: any; initial?: an
                 const failed = Object.entries(res?.applied || {})
                   .filter(([, ok]) => !ok)
                   .map(([k]) => k)
-                if (failed.length) setError(`Not saved: ${failed.join(', ')}`)
-                else onClose()
+                if (failed.length) {
+                  const modelSaved = adv.dirtyModel && res?.applied?.model === true
+                  setError(`Not saved: ${failed.join(', ')}${res?.effortError ? ` (effort: ${res.effortError})` : ''}${modelSaved ? '. The model was saved.' : ''}`)
+                  // A saved model is not written again on the retry.
+                  if (res?.applied?.effort === false && modelSaved) setAdv((s: any) => ({ ...s, dirtyModel: false }))
+                } else onClose()
               } catch (err: any) {
                 setError(String(err?.message || err))
               } finally {
@@ -417,15 +423,37 @@ export function ConfigDialog({ bot, initial, onClose }: { bot: any; initial?: an
 }
 
 /** The panel's Model row: the same ModelPicker as the config screen, for
- *  the model only, saved the same way (rosterActions saveBotModel). */
+ *  the model only, saved the same way (rosterActions saveBotModel), and the
+ *  bot's reasoning Effort (saveBotEffort). */
 export function ModelDialog({ bot, onClose }: { bot: any; onClose: () => void }) {
   const current = useStore(roster2.models)[rowKey(bot)]
   const [value, setValue] = React.useState<null | { provider: string; model: string }>(() => (current?.loaded ? { provider: current.provider, model: current.model } : null))
   const [dirty, setDirty] = React.useState(false)
+  // The reasoning effort: what the profile holds (`effortBase`), what is picked
+  // (`effort`), and how the read went. A failed read never blocks the model.
+  const [effort, setEffort] = React.useState('')
+  const [effortBase, setEffortBase] = React.useState('')
+  const [effortStatus, setEffortStatus] = React.useState('loading')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<null | string>(null)
+  const effortDirty = effort !== '' && effort !== effortBase
   React.useEffect(() => {
     void loadBotModel(bot)
+  }, [rowKey(bot)])
+  React.useEffect(() => {
+    let live = true
+    loadBotEffort(bot).then(
+      (level: string) => {
+        if (!live) return
+        setEffort(level)
+        setEffortBase(level)
+        setEffortStatus('ok')
+      },
+      () => live && setEffortStatus('error')
+    )
+    return () => {
+      live = false
+    }
   }, [rowKey(bot)])
   React.useEffect(() => {
     if (!value && current?.loaded) setValue({ provider: current.provider, model: current.model })
@@ -435,10 +463,25 @@ export function ModelDialog({ bot, onClose }: { bot: any; onClose: () => void })
     setBusy(true)
     setError(null)
     try {
-      const res = await saveBotModel(bot, value)
-      if (res?.applied?.model === true) onClose()
-      else if (res?.confirmation?.accepted === false) setError('Not saved: the model was not confirmed.')
-      else setError('Not saved: model')
+      // Only what changed is written; the effort only after a changed model landed.
+      if (dirty) {
+        const res = await saveBotModel(bot, value)
+        if (res?.applied?.model !== true) {
+          setError(res?.confirmation?.accepted === false ? 'Not saved: the model was not confirmed.' : 'Not saved: model')
+          return
+        }
+        setDirty(false)
+      }
+      if (effortDirty) {
+        try {
+          await saveBotEffort(bot, effort)
+          setEffortBase(effort)
+        } catch (err: any) {
+          setError(`${dirty ? 'The model was saved, but the' : 'The'} effort was not saved: ${String(err?.message || err)}`)
+          return
+        }
+      }
+      onClose()
     } catch (err: any) {
       setError(String(err?.message || err))
     } finally {
@@ -457,21 +500,24 @@ export function ModelDialog({ bot, onClose }: { bot: any; onClose: () => void })
           <button type="button" className="gbo-btn is-ghost" disabled={busy} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="gbo-btn is-primary" disabled={busy || !dirty || !value} onClick={() => void save()}>
+          <button type="button" className="gbo-btn is-primary" disabled={busy || !(dirty || effortDirty) || !value} onClick={() => void save()}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </>
       }
     >
       {value ? (
-        <ModelPicker
-          bot={bot}
-          value={value}
-          onChange={patch => {
-            setDirty(true)
-            setValue(v => ({ ...(v || { provider: '', model: '' }), ...patch }))
-          }}
-        />
+        <>
+          <ModelPicker
+            bot={bot}
+            value={value}
+            onChange={patch => {
+              setDirty(true)
+              setValue(v => ({ ...(v || { provider: '', model: '' }), ...patch }))
+            }}
+          />
+          <EffortField value={effort} status={effortStatus} onChange={setEffort} />
+        </>
       ) : current?.error ? (
         <div className="gbo-form-error">Could not read the bot’s model: {current.error}</div>
       ) : (

@@ -23,12 +23,51 @@ export function emptyAdvancedState() {
     skills: [],
     toolsets: [],
     mcp: [],
+    effort: '',
+    effortBase: '',
+    effortStatus: '',
+    dirtyEffort: false,
     dirtyModel: false,
     dirtySoul: false,
     dirtySkills: false,
     dirtyToolsets: false,
     dirtyMcp: false
   }
+}
+
+/** The reasoning-effort levels, in the order the Effort select lists them:
+ *  [config value, label]. The gateway's `reasoning` key takes these values. */
+export const EFFORT_LEVELS = [
+  ['none', 'Off'],
+  ['minimal', 'Minimal'],
+  ['low', 'Low'],
+  ['medium', 'Medium'],
+  ['high', 'High'],
+  ['xhigh', 'Extra high'],
+  ['max', 'Max'],
+  ['ultra', 'Ultra']
+]
+
+export function effortLabel(value) {
+  const hit = EFFORT_LEVELS.find(([id]) => id === value)
+  return hit ? hit[1] : ''
+}
+
+/** config.get {key:'reasoning'} (the profile's default: no session_id)
+ *  answers `{value, display}`; a reply with no level we list is a failed read. */
+export function effortFromReply(res) {
+  const value = String(res?.value ?? '')
+  if (!effortLabel(value)) throw new Error('the gateway did not report an effort level')
+  return value
+}
+
+export const EFFORT_GET_PARAMS = Object.freeze({ key: 'reasoning' })
+
+/** config.set {key:'reasoning', value, scope:'global'} writes the profile's
+ *  agent.reasoning_effort; with a live `session_id` it also applies the level
+ *  to that session's running agent. */
+export function effortSetParams(value, sessionId = '') {
+  return { key: 'reasoning', value, scope: 'global', ...(sessionId ? { session_id: sessionId } : {}) }
 }
 
 /** The describe + catalog read (profile-config.tsx:149). Rejects when the

@@ -5,7 +5,7 @@
 import { attentionFromEvent, clearAttention, noteAttention } from '../core/attention.js'
 import { botMetaKey, effectiveMeta, overlayEntry, pruneOverlay, readServerBotMeta, saveBotMetaPatch } from '../core/botMeta.js'
 import { cronAddParams, cronEditUpdates, cronJobRestPath, cronRemoveParams, CRON_TRIGGER_REQUEST_TIMEOUT_MS, isStoredJobFor } from '../core/cronOps.js'
-import { applyAdvancedConfig, emptyAdvancedState, loadAdvanced } from '../core/profileConfig.js'
+import { applyAdvancedConfig, EFFORT_GET_PARAMS, effortFromReply, effortSetParams, emptyAdvancedState, loadAdvanced } from '../core/profileConfig.js'
 import {
   capabilityPayload,
   composeSoul,
@@ -287,9 +287,10 @@ export async function saveProfileEdits(bot: any, { look, description, advanced }
       notifyError(error, 'Saved, but the description could not be updated')
     }
   }
-  if (advanced && advanced.loaded && (advanced.dirtyModel || advanced.dirtySoul || advanced.dirtySkills || advanced.dirtyToolsets || advanced.dirtyMcp)) {
+  if (advanced && advanced.loaded && (advanced.dirtyModel || advanced.dirtyEffort || advanced.dirtySoul || advanced.dirtySkills || advanced.dirtyToolsets || advanced.dirtyMcp)) {
     const res = await saveAdvanced(bot, advanced)
     if (!res.ok) failed.push(...Object.entries(res.applied || {}).filter(([, ok]) => !ok).map(([k]) => k))
+    if (res.effortError) notifyError(new Error(res.effortError), 'The effort could not be saved')
   }
   return failed
 }
@@ -329,7 +330,32 @@ export async function saveAdvanced(bot: any, state: any) {
     if (res?.applied?.model === true) setBotModel(bot, { provider: String(state.provider || '').trim(), model: String(state.model || '').trim() })
     else void loadBotModel(bot, { force: true })
   }
+  // The effort goes last, and only once a model written alongside it landed.
+  if (state?.dirtyEffort) {
+    const applied: Record<string, boolean> = { ...(res?.applied || {}) }
+    if (state.dirtyModel && applied.model !== true) {
+      applied.effort = false
+      res.effortError = 'not written, the model was not saved'
+    } else {
+      try {
+        await saveBotEffort(bot, String(state.effort || ''))
+        applied.effort = true
+      } catch (error: any) {
+        applied.effort = false
+        res.effortError = String(error?.message || error)
+      }
+    }
+    res.applied = applied
+    res.ok = Object.values(applied).every(Boolean)
+  }
   return res
+}
+
+/** The panel's Model row follows an effort read or write; a bot whose model
+ *  has not been read has no row state to add it to. */
+function setBotEffort(bot: any, effort: string) {
+  const key = rowKey(bot)
+  roster2.models.set(all => (all[key] ? { ...all, [key]: { ...all[key], effort } } : all))
 }
 
 function setBotModel(bot: any, patch: Partial<BotModel>) {
@@ -348,6 +374,8 @@ export async function loadBotModel(bot: any, { force = false }: { force?: boolea
   try {
     const res: any = await request(bot, 'profiles.describe', { name: bot.name })
     setBotModel(bot, { provider: String(res?.model?.provider || ''), model: String(res?.model?.default || ''), error: null })
+    // The row shows the effort when the gateway can tell; otherwise it stays as it was.
+    void loadBotEffort(bot).then(effort => setBotEffort(bot, effort), () => undefined)
   } catch (error: any) {
     roster2.models.set(all => ({ ...all, [key]: { provider: '', model: '', ...all[key], loading: false, loaded: false, error: String(error?.message || error) } }))
   }
@@ -359,6 +387,28 @@ export async function loadBotModel(bot: any, { force = false }: { force?: boolea
  *  confirmation, or `config unset model` when both are emptied). */
 export function saveBotModel(bot: any, value: { provider: string; model: string }) {
   return saveAdvanced(bot, { ...emptyAdvancedState(), loaded: true, provider: value.provider, model: value.model, dirtyModel: true })
+}
+
+/** The bot's reasoning effort: `config.get {key:'reasoning'}` on its own
+ *  route, WITHOUT a session id (it is the profile's default that is edited).
+ *  Rejects when the gateway cannot answer. */
+export async function loadBotEffort(bot: any): Promise<string> {
+  return effortFromReply(await request(bot, 'config.get', { ...EFFORT_GET_PARAMS }))
+}
+
+/** The runtime session of the Bot Chat that is open for this bot ('' when
+ *  none): the chat controller's state (app.chat) carries its bot and live
+ *  runtime id, the same id its prompt, steer and slash RPCs use. */
+function liveRuntimeOf(bot: any): string {
+  const chat = app.chat.get()
+  return chat?.bot && chat.runtimeId && rowKey(chat.bot) === rowKey(bot) ? String(chat.runtimeId) : ''
+}
+
+/** Write the bot's reasoning effort to its profile (`scope: 'global'`); with
+ *  its Bot Chat open the same call applies it to that running chat too. */
+export async function saveBotEffort(bot: any, effort: string) {
+  await request(bot, 'config.set', effortSetParams(effort, liveRuntimeOf(bot)))
+  setBotEffort(bot, effort)
 }
 
 /** Seed a bot's Model row (the preview and tests). */

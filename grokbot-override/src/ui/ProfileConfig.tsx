@@ -4,10 +4,10 @@
 
 import * as React from 'react'
 
-import { boundedFetch, mcpNeedsSetup, modelOptionsParams, providerMatches, providerModels, toggleEntry, usableProviders } from '../core/profileConfig.js'
+import { boundedFetch, EFFORT_LEVELS, mcpNeedsSetup, modelOptionsParams, providerMatches, providerModels, toggleEntry, usableProviders } from '../core/profileConfig.js'
 import { resolveBotConnectionRoute } from '../core/routing.js'
 import { Check, Field, Select } from './kit'
-import { installSkill, loadProfileConfig, request, searchSkills } from './rosterActions'
+import { installSkill, loadBotEffort, loadProfileConfig, request, searchSkills } from './rosterActions'
 import { host, sdk } from './sdk'
 
 const modelCache = new Map<string, { at: number; value: any }>()
@@ -106,6 +106,26 @@ export function ModelPicker({ bot, value, onChange }: { bot: any; value: { provi
         />
       </Field>
     </div>
+  )
+}
+
+/** The reasoning-effort select (stock's Effort field), under the model
+ *  picker. `status` is the read of the current level: until it is 'ok' or
+ *  'error' the field is disabled; after an error nothing is preselected and a
+ *  note says so, but the field still works. */
+export function EffortField({ value, status, onChange }: { value: string; status: string; onChange: (value: string) => void }) {
+  const waiting = status !== 'ok' && status !== 'error'
+  return (
+    <Field label="Effort" hint="Hermes uses the closest level the model supports.">
+      <Select
+        label="Effort"
+        value={value}
+        disabled={waiting}
+        onChange={v => v && onChange(v)}
+        options={value ? EFFORT_LEVELS : [['', waiting ? 'Loading…' : '—'], ...EFFORT_LEVELS]}
+      />
+      {status === 'error' ? <span className="gbo-field-hint is-error">The current effort could not be read.</span> : null}
+    </Field>
   )
 }
 
@@ -343,6 +363,15 @@ export function AdvancedConfig({ bot, state, setState }: { bot: any; state: any;
       live = false
     }
   }, [loadKey])
+  React.useEffect(() => {
+    // The bot's current effort, read once the config is (a failed read leaves the field usable).
+    if (!state.loaded || state.effortStatus) return
+    setState(s => ({ ...s, effortStatus: 'loading' }))
+    loadBotEffort(bot).then(
+      (effort: string) => setState(s => ({ ...s, effort, effortBase: effort, effortStatus: 'ok' })),
+      () => setState(s => ({ ...s, effortStatus: 'error' }))
+    )
+  }, [state.loaded])
   if (unsupported) return <div className="gbo-form-note">This bot’s Hermes cannot describe its profile here ({unsupported}). Use `hermes -p {bot.name} config` on its machine.</div>
   if (!state.loaded) return <div className="gbo-form-note">Loading the bot’s config…</div>
   const skills = filter.trim() ? state.skills.filter((s: any) => s.name.toLowerCase().includes(filter.trim().toLowerCase())) : state.skills
@@ -350,6 +379,7 @@ export function AdvancedConfig({ bot, state, setState }: { bot: any; state: any;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ModelPicker bot={bot} value={{ provider: state.provider, model: state.model }} onChange={patch => setState(s => ({ ...s, dirtyModel: true, ...patch }))} />
+      <EffortField value={state.effort || ''} status={state.effortStatus || ''} onChange={v => setState(s => ({ ...s, effort: v, dirtyEffort: v !== s.effortBase }))} />
       <Field label={`Skills · ${on(state.skills)} of ${state.skills.length} on`}>
         <input className="gbo-input" placeholder="Filter skills" value={filter} onChange={e => setFilter(e.target.value)} />
         <div className="gbo-check-list">

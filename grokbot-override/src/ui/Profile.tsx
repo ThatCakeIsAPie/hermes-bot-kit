@@ -10,6 +10,7 @@
 import * as React from 'react'
 
 import { isLegacyDelegatedRoutine, routineTitle } from '../core/cronOps.js'
+import { effortLabel } from '../core/profileConfig.js'
 import { displayName, handleOf, rowKey } from '../core/roster.js'
 import { app, backToOverride, loadCron, metaFor, openComputerViewer, openRoom, toggleCron } from './app'
 import { BotAvatar } from './Avatar'
@@ -46,8 +47,9 @@ function ModelCard({ bot }: { bot: any }) {
   React.useEffect(() => {
     void loadBotModel(bot)
   }, [key])
-  const value = current?.loaded ? current.model || 'Default' : current?.error ? 'Unavailable' : '…'
-  const title = current?.loaded ? `Model: ${current.model ? [current.provider, current.model].filter(Boolean).join(' · ') : 'the profile’s default'}` : current?.error ? `Model: could not read it (${current.error})` : 'Model'
+  const effort = current?.loaded ? effortLabel(current.effort || '') : ''
+  const value = current?.loaded ? [current.model || 'Default', effort].filter(Boolean).join(' · ') : current?.error ? 'Unavailable' : '…'
+  const title = current?.loaded ? `Model: ${current.model ? [current.provider, current.model].filter(Boolean).join(' · ') : 'the profile’s default'}${effort ? ` · Effort: ${effort}` : ''}` : current?.error ? `Model: could not read it (${current.error})` : 'Model'
   return (
     <section className="gbo-panel-section gbo-model-section">
       <div className="panel-card gbo-panel-box">

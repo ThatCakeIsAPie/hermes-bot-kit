@@ -19667,12 +19667,39 @@ function emptyAdvancedState() {
     skills: [],
     toolsets: [],
     mcp: [],
+    effort: "",
+    effortBase: "",
+    effortStatus: "",
+    dirtyEffort: false,
     dirtyModel: false,
     dirtySoul: false,
     dirtySkills: false,
     dirtyToolsets: false,
     dirtyMcp: false
   };
+}
+var EFFORT_LEVELS = [
+  ["none", "Off"],
+  ["minimal", "Minimal"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+  ["xhigh", "Extra high"],
+  ["max", "Max"],
+  ["ultra", "Ultra"]
+];
+function effortLabel(value) {
+  const hit = EFFORT_LEVELS.find(([id]) => id === value);
+  return hit ? hit[1] : "";
+}
+function effortFromReply(res) {
+  const value = String(res?.value ?? "");
+  if (!effortLabel(value)) throw new Error("the gateway did not report an effort level");
+  return value;
+}
+var EFFORT_GET_PARAMS = Object.freeze({ key: "reasoning" });
+function effortSetParams(value, sessionId = "") {
+  return { key: "reasoning", value, scope: "global", ...sessionId ? { session_id: sessionId } : {} };
 }
 async function loadAdvanced(request2, bot) {
   const opened = { spawnPriority: "foreground" };
@@ -20406,9 +20433,10 @@ async function saveProfileEdits(bot, { look, description, advanced }) {
       notifyError(error, "Saved, but the description could not be updated");
     }
   }
-  if (advanced && advanced.loaded && (advanced.dirtyModel || advanced.dirtySoul || advanced.dirtySkills || advanced.dirtyToolsets || advanced.dirtyMcp)) {
+  if (advanced && advanced.loaded && (advanced.dirtyModel || advanced.dirtyEffort || advanced.dirtySoul || advanced.dirtySkills || advanced.dirtyToolsets || advanced.dirtyMcp)) {
     const res = await saveAdvanced(bot, advanced);
     if (!res.ok) failed.push(...Object.entries(res.applied || {}).filter(([, ok]) => !ok).map(([k]) => k));
+    if (res.effortError) notifyError(new Error(res.effortError), "The effort could not be saved");
   }
   return failed;
 }
@@ -20437,7 +20465,28 @@ async function saveAdvanced(bot, state) {
     if (res?.applied?.model === true) setBotModel(bot, { provider: String(state.provider || "").trim(), model: String(state.model || "").trim() });
     else void loadBotModel(bot, { force: true });
   }
+  if (state?.dirtyEffort) {
+    const applied = { ...res?.applied || {} };
+    if (state.dirtyModel && applied.model !== true) {
+      applied.effort = false;
+      res.effortError = "not written, the model was not saved";
+    } else {
+      try {
+        await saveBotEffort(bot, String(state.effort || ""));
+        applied.effort = true;
+      } catch (error) {
+        applied.effort = false;
+        res.effortError = String(error?.message || error);
+      }
+    }
+    res.applied = applied;
+    res.ok = Object.values(applied).every(Boolean);
+  }
   return res;
+}
+function setBotEffort(bot, effort) {
+  const key = rowKey(bot);
+  roster2.models.set((all) => all[key] ? { ...all, [key]: { ...all[key], effort } } : all);
 }
 function setBotModel(bot, patch) {
   const key = rowKey(bot);
@@ -20451,12 +20500,24 @@ async function loadBotModel(bot, { force = false } = {}) {
   try {
     const res = await request(bot, "profiles.describe", { name: bot.name });
     setBotModel(bot, { provider: String(res?.model?.provider || ""), model: String(res?.model?.default || ""), error: null });
+    void loadBotEffort(bot).then((effort) => setBotEffort(bot, effort), () => void 0);
   } catch (error) {
     roster2.models.set((all) => ({ ...all, [key]: { provider: "", model: "", ...all[key], loading: false, loaded: false, error: String(error?.message || error) } }));
   }
 }
 function saveBotModel(bot, value) {
   return saveAdvanced(bot, { ...emptyAdvancedState(), loaded: true, provider: value.provider, model: value.model, dirtyModel: true });
+}
+async function loadBotEffort(bot) {
+  return effortFromReply(await request(bot, "config.get", { ...EFFORT_GET_PARAMS }));
+}
+function liveRuntimeOf(bot) {
+  const chat = app.chat.get();
+  return chat?.bot && chat.runtimeId && rowKey(chat.bot) === rowKey(bot) ? String(chat.runtimeId) : "";
+}
+async function saveBotEffort(bot, effort) {
+  await request(bot, "config.set", effortSetParams(effort, liveRuntimeOf(bot)));
+  setBotEffort(bot, effort);
 }
 async function searchSkills(query) {
   const res = await host2.request("skills.manage", { action: "search", query: String(query || "").trim() });
@@ -26395,6 +26456,22 @@ function ModelPicker({ bot, value, onChange }) {
     ) })
   ] });
 }
+function EffortField({ value, status, onChange }) {
+  const waiting = status !== "ok" && status !== "error";
+  return /* @__PURE__ */ jsxs12(Field, { label: "Effort", hint: "Hermes uses the closest level the model supports.", children: [
+    /* @__PURE__ */ jsx13(
+      Select,
+      {
+        label: "Effort",
+        value,
+        disabled: waiting,
+        onChange: (v) => v && onChange(v),
+        options: value ? EFFORT_LEVELS : [["", waiting ? "Loading…" : "—"], ...EFFORT_LEVELS]
+      }
+    ),
+    status === "error" ? /* @__PURE__ */ jsx13("span", { className: "gbo-field-hint is-error", children: "The current effort could not be read." }) : null
+  ] });
+}
 function SkillsHub({ bot, onInstalled }) {
   const [query, setQuery] = React12.useState("");
   const [results, setResults] = React12.useState(null);
@@ -26594,6 +26671,14 @@ function AdvancedConfig({ bot, state, setState }) {
       live = false;
     };
   }, [loadKey]);
+  React12.useEffect(() => {
+    if (!state.loaded || state.effortStatus) return;
+    setState((s) => ({ ...s, effortStatus: "loading" }));
+    loadBotEffort(bot).then(
+      (effort) => setState((s) => ({ ...s, effort, effortBase: effort, effortStatus: "ok" })),
+      () => setState((s) => ({ ...s, effortStatus: "error" }))
+    );
+  }, [state.loaded]);
   if (unsupported) return /* @__PURE__ */ jsxs12("div", { className: "gbo-form-note", children: [
     "This bot’s Hermes cannot describe its profile here (",
     unsupported,
@@ -26606,6 +26691,7 @@ function AdvancedConfig({ bot, state, setState }) {
   const on = (list) => list.filter((x) => x.enabled).length;
   return /* @__PURE__ */ jsxs12("div", { style: { display: "flex", flexDirection: "column", gap: 14 }, children: [
     /* @__PURE__ */ jsx13(ModelPicker, { bot, value: { provider: state.provider, model: state.model }, onChange: (patch) => setState((s) => ({ ...s, dirtyModel: true, ...patch })) }),
+    /* @__PURE__ */ jsx13(EffortField, { value: state.effort || "", status: state.effortStatus || "", onChange: (v) => setState((s) => ({ ...s, effort: v, dirtyEffort: v !== s.effortBase })) }),
     /* @__PURE__ */ jsxs12(Field, { label: `Skills · ${on(state.skills)} of ${state.skills.length} on`, children: [
       /* @__PURE__ */ jsx13("input", { className: "gbo-input", placeholder: "Filter skills", value: filter, onChange: (e2) => setFilter(e2.target.value) }),
       /* @__PURE__ */ jsx13("div", { className: "gbo-check-list", children: skills.map((s) => /* @__PURE__ */ jsx13(Check, { title: s.description || s.name, checked: Boolean(s.enabled), onChange: (v) => setState((st) => toggleEntry(st, "skills", s.name, v)), children: s.name }, s.name)) })
@@ -28221,7 +28307,7 @@ function ConfigDialog({ bot, initial, onClose }) {
   const [adv, setAdv] = React15.useState(() => initial?.loaded ? initial : emptyAdvancedState());
   const [busy, setBusy] = React15.useState(false);
   const [error, setError] = React15.useState(null);
-  const dirty = adv.dirtyModel || adv.dirtySoul || adv.dirtySkills || adv.dirtyToolsets || adv.dirtyMcp;
+  const dirty = adv.dirtyModel || adv.dirtyEffort || adv.dirtySoul || adv.dirtySkills || adv.dirtyToolsets || adv.dirtyMcp;
   return /* @__PURE__ */ jsxs15(
     Dialog,
     {
@@ -28245,8 +28331,11 @@ function ConfigDialog({ bot, initial, onClose }) {
               try {
                 const res = await saveAdvanced(bot, adv);
                 const failed = Object.entries(res?.applied || {}).filter(([, ok]) => !ok).map(([k]) => k);
-                if (failed.length) setError(`Not saved: ${failed.join(", ")}`);
-                else onClose();
+                if (failed.length) {
+                  const modelSaved = adv.dirtyModel && res?.applied?.model === true;
+                  setError(`Not saved: ${failed.join(", ")}${res?.effortError ? ` (effort: ${res.effortError})` : ""}${modelSaved ? ". The model was saved." : ""}`);
+                  if (res?.applied?.effort === false && modelSaved) setAdv((s) => ({ ...s, dirtyModel: false }));
+                } else onClose();
               } catch (err2) {
                 setError(String(err2?.message || err2));
               } finally {
@@ -28268,10 +28357,29 @@ function ModelDialog({ bot, onClose }) {
   const current = useStore(roster2.models)[rowKey(bot)];
   const [value, setValue] = React15.useState(() => current?.loaded ? { provider: current.provider, model: current.model } : null);
   const [dirty, setDirty] = React15.useState(false);
+  const [effort, setEffort] = React15.useState("");
+  const [effortBase, setEffortBase] = React15.useState("");
+  const [effortStatus, setEffortStatus] = React15.useState("loading");
   const [busy, setBusy] = React15.useState(false);
   const [error, setError] = React15.useState(null);
+  const effortDirty = effort !== "" && effort !== effortBase;
   React15.useEffect(() => {
     void loadBotModel(bot);
+  }, [rowKey(bot)]);
+  React15.useEffect(() => {
+    let live = true;
+    loadBotEffort(bot).then(
+      (level) => {
+        if (!live) return;
+        setEffort(level);
+        setEffortBase(level);
+        setEffortStatus("ok");
+      },
+      () => live && setEffortStatus("error")
+    );
+    return () => {
+      live = false;
+    };
   }, [rowKey(bot)]);
   React15.useEffect(() => {
     if (!value && current?.loaded) setValue({ provider: current.provider, model: current.model });
@@ -28281,10 +28389,24 @@ function ModelDialog({ bot, onClose }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await saveBotModel(bot, value);
-      if (res?.applied?.model === true) onClose();
-      else if (res?.confirmation?.accepted === false) setError("Not saved: the model was not confirmed.");
-      else setError("Not saved: model");
+      if (dirty) {
+        const res = await saveBotModel(bot, value);
+        if (res?.applied?.model !== true) {
+          setError(res?.confirmation?.accepted === false ? "Not saved: the model was not confirmed." : "Not saved: model");
+          return;
+        }
+        setDirty(false);
+      }
+      if (effortDirty) {
+        try {
+          await saveBotEffort(bot, effort);
+          setEffortBase(effort);
+        } catch (err2) {
+          setError(`${dirty ? "The model was saved, but the" : "The"} effort was not saved: ${String(err2?.message || err2)}`);
+          return;
+        }
+      }
+      onClose();
     } catch (err2) {
       setError(String(err2?.message || err2));
     } finally {
@@ -28301,20 +28423,23 @@ function ModelDialog({ bot, onClose }) {
       description: "Written to the bot’s own Hermes profile on save.",
       footer: /* @__PURE__ */ jsxs15(Fragment10, { children: [
         /* @__PURE__ */ jsx16("button", { type: "button", className: "gbo-btn is-ghost", disabled: busy, onClick: onClose, children: "Cancel" }),
-        /* @__PURE__ */ jsx16("button", { type: "button", className: "gbo-btn is-primary", disabled: busy || !dirty || !value, onClick: () => void save(), children: busy ? "Saving…" : "Save" })
+        /* @__PURE__ */ jsx16("button", { type: "button", className: "gbo-btn is-primary", disabled: busy || !(dirty || effortDirty) || !value, onClick: () => void save(), children: busy ? "Saving…" : "Save" })
       ] }),
       children: [
-        value ? /* @__PURE__ */ jsx16(
-          ModelPicker,
-          {
-            bot,
-            value,
-            onChange: (patch) => {
-              setDirty(true);
-              setValue((v) => ({ ...v || { provider: "", model: "" }, ...patch }));
+        value ? /* @__PURE__ */ jsxs15(Fragment10, { children: [
+          /* @__PURE__ */ jsx16(
+            ModelPicker,
+            {
+              bot,
+              value,
+              onChange: (patch) => {
+                setDirty(true);
+                setValue((v) => ({ ...v || { provider: "", model: "" }, ...patch }));
+              }
             }
-          }
-        ) : current?.error ? /* @__PURE__ */ jsxs15("div", { className: "gbo-form-error", children: [
+          ),
+          /* @__PURE__ */ jsx16(EffortField, { value: effort, status: effortStatus, onChange: setEffort })
+        ] }) : current?.error ? /* @__PURE__ */ jsxs15("div", { className: "gbo-form-error", children: [
           "Could not read the bot’s model: ",
           current.error
         ] }) : /* @__PURE__ */ jsx16("div", { className: "gbo-form-note", children: "Loading the bot’s model…" }),
@@ -29555,8 +29680,9 @@ function ModelCard({ bot }) {
   React19.useEffect(() => {
     void loadBotModel(bot);
   }, [key]);
-  const value = current?.loaded ? current.model || "Default" : current?.error ? "Unavailable" : "…";
-  const title = current?.loaded ? `Model: ${current.model ? [current.provider, current.model].filter(Boolean).join(" · ") : "the profile’s default"}` : current?.error ? `Model: could not read it (${current.error})` : "Model";
+  const effort = current?.loaded ? effortLabel(current.effort || "") : "";
+  const value = current?.loaded ? [current.model || "Default", effort].filter(Boolean).join(" · ") : current?.error ? "Unavailable" : "…";
+  const title = current?.loaded ? `Model: ${current.model ? [current.provider, current.model].filter(Boolean).join(" · ") : "the profile’s default"}${effort ? ` · Effort: ${effort}` : ""}` : current?.error ? `Model: could not read it (${current.error})` : "Model";
   return /* @__PURE__ */ jsx21("section", { className: "gbo-panel-section gbo-model-section", children: /* @__PURE__ */ jsx21("div", { className: "panel-card gbo-panel-box", children: /* @__PURE__ */ jsxs19("button", { type: "button", className: "panel-row panel-row--setting gbo-model-row", title, "aria-label": `Model: ${value}. Change the model`, onClick: () => openDialog({ kind: "model", bot }), children: [
     /* @__PURE__ */ jsx21("span", { className: "panel-row__title", children: "Model" }),
     /* @__PURE__ */ jsxs19("span", { className: "gbo-model-value", children: [

@@ -26,6 +26,8 @@ export interface BotModel {
   provider: string
   model: string
   error: null | string
+  /** The bot's reasoning effort (config.get `reasoning`) once it has been read. */
+  effort?: string
 }
 
 export const roster2 = {
